@@ -1,7 +1,7 @@
 .PHONY: run test clean
 
 run:
-	uv run python src/reconcile.py
+	uv run python -m src.reconcile
 
 test:
 	uv run pytest
