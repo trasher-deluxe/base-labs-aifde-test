@@ -1,13 +1,20 @@
-"""Invoice reconciliation pipeline."""
+"""Invoice reconciliation pipeline.
 
+Financial decisions are rule-based and deterministic here. The LLM layer
+(`ai_explain.py`) only rewrites explanations; it never decides a status.
+"""
+
+import json
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import pandas as pd
 
+# Layer 1: text signals from the payment reference + operational note.
+# Order matters: the first matching rule wins (general policy before data).
 RULES = [
-    ("Suspicious", r"twice|duplicate|same payment|accidentally|doble|double"),
+    ("Suspicious", r"twice|duplicate|same payment|accidentally|double"),
     (
         "Needs Review",
         r"verify|manually review|review before|EUR.*payment|any.*EUR|mismatch",
@@ -26,6 +33,8 @@ _INV_DIRECT = r"(?i)\bINV-?(\d{4})(?!\d)"
 _INV_WORD = r"(?i)\binvoice\s+(\d{4})\b"
 _PO = r"(PO-\d{4})"
 
+STATUSES = {"Matched", "Partial Match", "Needs Review", "Unmatched", "Suspicious"}
+
 
 def _extract_ids(ser: pd.Series) -> pd.DataFrame:
     inv = ser.str.extract(_INV_DIRECT)[0].fillna(ser.str.extract(_INV_WORD)[0])
@@ -38,7 +47,7 @@ def _extract_ids(ser: pd.Series) -> pd.DataFrame:
 
 
 def _vendor_sim(vendor: str, payer: str) -> float:
-    """0..1 similitud de nombres; distingue typo (~0.95) de payer ajeno (~0.2)."""
+    """0..1 name similarity; tells a typo (~0.95) from a stranger payer (~0.2)."""
     return SequenceMatcher(None, str(vendor).lower(), str(payer).lower()).ratio()
 
 
@@ -50,7 +59,8 @@ def classify_text(text: str) -> str:
 
 
 def _classify_data(row: pd.Series) -> str:
-    if pd.isna(row["invoice_id"]):  # pago huérfano: ninguna factura lo reclama
+    """Layer 2: data signals, only for what the text could not classify."""
+    if pd.isna(row["invoice_id"]):  # orphan payment: no invoice claims it
         return "Unmatched"
     if row["flag"] != "Unmatched":
         return row["flag"]
@@ -71,49 +81,68 @@ def _classify_data(row: pd.Series) -> str:
     return "Unmatched"
 
 
+def confidence(row: pd.Series) -> float:
+    """Confidence (0..1) that the payment belongs to this invoice, from match
+    signals (vendor name, currency, amount closeness). Independent from whether
+    the case still needs review: a Suspicious case can be a confident match."""
+    if row["flag"] == "Unmatched":
+        return 0.2
+    signals = []
+    payer, vendor = row.get("payer_name"), row.get("vendor")
+    if pd.notna(payer) and pd.notna(vendor):
+        signals.append(_vendor_sim(vendor, payer))
+    signals.append(
+        1.0 if row.get("currency_invoice_tbl") == row.get("currency_payments") else 0.0
+    )
+    amt_i, amt_p = row.get("amount_invoice_tbl"), row.get("amount_payments")
+    if pd.notna(amt_i) and pd.notna(amt_p) and max(amt_i, amt_p):
+        signals.append(min(amt_i, amt_p) / max(amt_i, amt_p))
+    return round(sum(signals) / len(signals), 2)
+
+
 def explain(row: pd.Series) -> str:
-    """Motivo en lenguaje plano. Re-evalúa las mismas señales que _classify_data,
-    en el mismo orden, para que el 'por qué' coincida con la causa real del flag."""
+    """Plain-language reason. Re-evaluates the same signals as _classify_data, in
+    the same order, so the 'why' matches the real cause of the flag."""
     flag = row["flag"]
     cur_p, cur_i = row.get("currency_payments"), row.get("currency_invoice_tbl")
     amt_p, amt_i = row.get("amount_payments"), row.get("amount_invoice_tbl")
     payer, vendor = row.get("payer_name"), row.get("vendor")
     note = row.get("text")
     note = note if pd.notna(note) else ""
-    tail = f" Nota: «{note}»." if note else ""
+    tail = f" Note: '{note}'." if note else ""
 
     if flag == "Unmatched":
-        if pd.notna(payer):  # pago huérfano
+        if pd.notna(payer):  # orphan payment
             return (
-                f"Pago {row.get('payment_id')} de '{payer}' ({amt_p} {cur_p}) "
-                f"sin factura vinculable (ref: '{row.get('reference')}')."
+                f"Payment {row.get('payment_id')} from '{payer}' ({amt_p} {cur_p}) "
+                f"has no matching invoice (ref: '{row.get('reference')}')."
             )
-        return "Ninguna factura encontró un pago que la concilie."
+        return "No payment could be matched to this invoice."
 
     if flag == "Suspicious":
-        return f"Posible pago duplicado; no cerrar hasta verificar.{tail}"
+        return f"Possible duplicate payment; do not close until verified.{tail}"
 
-    if flag == "Needs Review":  # general -> particular: política (nota) antes que datos
+    if flag == "Needs Review":  # general -> particular: note policy before raw data
         if note and re.search(
             r"(?i)verify|manually review|review before|\bEUR\b", note
         ):
-            extra = f" — pago {cur_p} vs {cur_i} facturado" if cur_p != cur_i else ""
-            return f"Revisión por política de la nota: «{note}»{extra}."
+            extra = f" — paid in {cur_p} vs {cur_i} invoiced" if cur_p != cur_i else ""
+            return f"Flagged for review by the note policy: '{note}'{extra}."
         if bool(row.get("IS_DUE_PAYMENT")):
-            return f"Pago posterior a la fecha de vencimiento; revisar.{tail}"
+            return f"Payment is past the invoice due date; review.{tail}"
         if pd.notna(amt_i) and cur_p != cur_i:
-            return f"Moneda {cur_p} no coincide con {cur_i} facturada.{tail}"
+            return f"Currency {cur_p} does not match invoiced {cur_i}.{tail}"
         if payer == "Unknown Vendor":
-            return "Pagador desconocido ('Unknown Vendor'); no se confirma el origen."
+            return "Unknown payer ('Unknown Vendor'); origin cannot be confirmed."
         if pd.notna(amt_i) and pd.notna(amt_p) and amt_p > amt_i:
-            return f"Sobrepago: {amt_p} {cur_p} contra {amt_i} facturado.{tail}"
-        return f"Señal ambigua; requiere revisión humana.{tail}"
+            return f"Overpayment: {amt_p} {cur_p} against {amt_i} invoiced.{tail}"
+        return f"Ambiguous signal; needs human review.{tail}"
 
     if flag == "Partial Match":
         rb = row.get("remaining_balance")
-        base = f"Pago parcial: {amt_p} de {amt_i} {cur_p}"
+        base = f"Partial payment: {amt_p} of {amt_i} {cur_p}"
         if pd.notna(rb):
-            base += f"; saldo pendiente {rb:.2f}"
+            base += f"; outstanding balance {rb:.2f}"
         return base + (tail or ".")
 
     # Matched
@@ -121,15 +150,15 @@ def explain(row: pd.Series) -> str:
     parts = []
     if pd.notna(amt_i) and pd.notna(amt_p) and abs(amt_p - amt_i) >= 0.005:
         parts.append(
-            f"diferencia de {amt_i - amt_p:.2f} explicada por descuento/ajuste"
+            f"{amt_i - amt_p:.2f} difference explained by a discount/adjustment"
         )
     else:
-        parts.append(f"monto {amt_p} {cur_p} coincide")
+        parts.append(f"amount {amt_p} {cur_p} matches")
     if sim < 1.0:
-        parts.append(f"payer ~{sim:.0%} similar al vendor (typo probable)")
+        parts.append(f"payer ~{sim:.0%} similar to vendor (likely typo)")
     if note:
-        parts.append(f"nota: «{note}»")
-    return "Conciliado: " + "; ".join(parts) + "."
+        parts.append(f"note: '{note}'")
+    return "Matched: " + "; ".join(parts) + "."
 
 
 def load(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -201,10 +230,10 @@ def _build(
     df["text"] = df["text_x"].fillna(df["text_y"])
     df = df.drop(columns=["source_x", "source_y", "text_x", "text_y"])
 
-    # Fallback general -> particular: una nota sin INV/PO es una política a nivel
-    # vendor (p.ej. "Nova Packaging ... revisar pagos EUR"). Se liga por nombre de
-    # vendor cuando la factura aún no tiene nota, antes de caer en señales de datos.
-    # ponytail: match por primer token del vendor; suficiente para notas de política.
+    # General -> particular fallback: a note without an INV/PO id is a vendor-level
+    # policy (e.g. "Nova Packaging ... review EUR payments"). Link it by vendor name
+    # when the invoice has no note yet, before falling back to raw data signals.
+    # ponytail: match on the vendor's first token; enough for these policy notes.
     loose = nts[nts["EXTRACTED_invoice_id"].isna() & nts["EXTRACTED_po_number"].isna()]
     for i in df.index[df["text"].isna()]:
         token = str(df.at[i, "vendor"]).split()[0].lower()
@@ -217,14 +246,11 @@ def _build(
     return df
 
 
-STATUSES = {"Matched", "Partial Match", "Needs Review", "Unmatched", "Suspicious"}
-
-
 def run(data_dir: Path = Path("data")) -> pd.DataFrame:
     invoices, payments, notes = load(data_dir)
     df = _build(invoices, payments, notes)
 
-    # Clasificación obligatoria: anexar pagos que ninguna factura reclamó.
+    # Mandatory classification: append payments no invoice claimed (-> Unmatched).
     matched = set(df["payment_id"].dropna())
     orphans = payments[~payments["payment_id"].isin(matched)].rename(
         columns={"currency": "currency_payments", "amount": "amount_payments"}
@@ -235,17 +261,73 @@ def run(data_dir: Path = Path("data")) -> pd.DataFrame:
     df["flag"] = df["ALL_REFERENCES"].apply(classify_text)
     df["flag"] = df.apply(_classify_data, axis=1)
 
-    df["remaining_balance"] = (df["amount_invoice_tbl"] - df["amount_payments"]).where(
-        df["flag"] == "Partial Match"
+    df["remaining_balance"] = (df["amount_invoice_tbl"] - df["amount_payments"]).round(
+        2
     )
+    df["confidence"] = df.apply(confidence, axis=1)
     df["explanation"] = df.apply(explain, axis=1)
     return df
+
+
+def to_records(df: pd.DataFrame) -> list[dict]:
+    """Output rows, one per invoice (duplicate payments grouped into a list), plus
+    one record per orphan payment. Matches the required output fields."""
+
+    def explanation_of(row: pd.Series) -> str:
+        return row.get("ai_explanation", row["explanation"])
+
+    records = []
+    invoiced = df[df["invoice_id"].notna()]
+    for invoice_id, group in invoiced.groupby("invoice_id", sort=True):
+        first = group.iloc[0]
+        bal = first.get("remaining_balance")
+        records.append(
+            {
+                "invoice_id": invoice_id,
+                "matched_payment_ids": group["payment_id"].dropna().tolist(),
+                "status": first["flag"],
+                "confidence": round(float(group["confidence"].mean()), 2),
+                "remaining_balance": None if pd.isna(bal) else round(float(bal), 2),
+                "suggested_action": first.get("suggested_action"),
+                "explanation": explanation_of(first),
+            }
+        )
+    for _, row in df[df["invoice_id"].isna()].iterrows():
+        records.append(
+            {
+                "invoice_id": None,
+                "matched_payment_ids": [row["payment_id"]],
+                "status": row["flag"],
+                "confidence": round(float(row["confidence"]), 2),
+                "remaining_balance": None,
+                "suggested_action": row.get("suggested_action"),
+                "explanation": explanation_of(row),
+            }
+        )
+    return records
+
+
+def export_json(df: pd.DataFrame, path: str | Path = "reconciliation.json") -> str:
+    path = Path(path)
+    path.write_text(json.dumps(to_records(df), indent=2, ensure_ascii=False))
+    return str(path)
 
 
 if __name__ == "__main__":
     from src.ai_explain import enrich
 
-    result = enrich(run())  # capa de IA; sin OPENAI_API_KEY cae a fallback determinista
-    cols = ["invoice_id", "payment_id", "flag", "suggested_action", "ai_explanation"]
-    print(result[cols].to_string(index=False))
-    # Las aserciones viven en tests/ (uv run pytest).
+    result = enrich(run())  # AI layer; without OPENAI_API_KEY it falls back cleanly
+    out = export_json(result)
+
+    view = pd.DataFrame(to_records(result))
+    cols = [
+        "invoice_id",
+        "matched_payment_ids",
+        "status",
+        "confidence",
+        "remaining_balance",
+        "suggested_action",
+    ]
+    print(view[cols].to_string(index=False))
+    print(f"\nWrote {len(view)} records to {out}  (full explanations inside)")
+    # Assertions live in tests/ (uv run pytest).
