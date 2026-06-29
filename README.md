@@ -12,9 +12,9 @@ uv sync                       # instala dependencias (pandas, etc.)
 uv run python -m src.reconcile
 ```
 
-Imprime una tabla CLI con `invoice_id, payment_id, flag, remaining_balance,
-explanation` y al final corre un self-check con `assert` (`all assertions
-passed`). La exploración paso a paso está en `notebooks/eda.ipynb`.
+Imprime una tabla CLI con `invoice_id, payment_id, flag, suggested_action,
+ai_explanation`. La exploración paso a paso está en `notebooks/eda.ipynb` y las
+aserciones en `tests/` (`uv run pytest`).
 
 ## Estados
 
@@ -54,20 +54,40 @@ El pipeline (`src/reconcile.py`) es **invoice-céntrico** y combina señales:
    `Unmatched` (garantiza que *todo* registro queda clasificado).
 6. **`remaining_balance`**: `amount_factura − amount_pago`, solo en Partial Match.
 
-## Dónde se usa "AI"
+## Capa de IA (explicaciones) — `src/ai_explain.py`
 
-La explicación por caso (`explain`) es **lógica AI-assisted / mock**, no una
-llamada a LLM todavía: a partir del flag ya decidido, re-evalúa las mismas
-señales en el mismo orden que `_classify_data` y arma el motivo, de modo que el
-"por qué" coincide con la causa real y no es texto inventado. Usa
-`difflib.SequenceMatcher` para expresar la similitud del nombre del pagador
-(distingue un typo ~95% de un pagador ajeno ~20%).
+Dos niveles, separados a propósito:
 
-**Si se cambiara a un LLM real**: el prompt recibiría las señales ya calculadas
-(montos, moneda, similitud de vendor, nota) y el flag, pidiendo *solo* redactar
-el motivo — nunca decidir el estado (guardrail: la clasificación queda en
-código determinista y auditable; el LLM no inventa cifras ni cambia el flag). La
-API key iría por variable de entorno, nunca commiteada.
+1. **Motivo determinista** (`reconcile.explain`): a partir del flag ya decidido,
+   re-evalúa las mismas señales en el mismo orden que `_classify_data`, de modo que
+   el "por qué" coincide con la causa real y no es texto inventado. Usa
+   `difflib.SequenceMatcher` para la similitud del pagador (typo ~95% vs ajeno ~20%).
+2. **Redacción con LLM** (`ai_explain.enrich`): toma ese motivo determinista + el
+   texto de la nota y, en **una sola llamada batcheada** al SDK de OpenAI con
+   **salida estructurada** (pydantic), devuelve por caso:
+   - `ai_explanation`: el motivo reescrito en inglés simple para el back-office.
+   - `suggested_action`: elegido de un **enum cerrado** (`Auto-match`,
+     `Request remaining balance`, `Manual review required`,
+     `Hold and investigate possible duplicate`, `Route to AP for manual investigation`).
+
+### Setup (no commitear secretos)
+
+```bash
+export OPENAI_API_KEY=sk-...        # o ponerlo en .env (ya está gitignored)
+export OPENAI_MODEL=gpt-4o-mini     # opcional (default gpt-4o-mini)
+uv run python -m src.reconcile
+```
+
+### Guardrails
+
+- **El LLM no decide el status.** La clasificación es 100% determinista y auditable
+  en `reconcile.py`; el LLM solo *redacta* y *elige* una acción del enum.
+- **Salida estructurada** (pydantic `Batch`/`CaseExplanation`): nada de parseo de
+  texto libre; las acciones quedan acotadas al enum.
+- **Re-alineación por `key`** (`payment_id`), no por orden de la respuesta.
+- **Fallback offline:** sin `OPENAI_API_KEY` o ante cualquier error de la API, cae
+  al motivo determinista + el mapa fijo `status → acción`. El pipeline siempre
+  produce ambas columnas y **los tests nunca tocan la red** (LLM mockeado).
 
 ## Casos observados en los datos
 
