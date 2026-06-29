@@ -1,122 +1,124 @@
 # Invoice ↔ Payment Reconciliation
 
-Concilia facturas (`invoices.csv`) contra pagos (`payments.csv`) usando además
-notas operativas en lenguaje natural (`notes.json`). Cada caso queda clasificado
-**obligatoriamente** en uno de 5 estados y acompañado de un motivo en lenguaje
-plano.
+An AI-assisted reconciliation assistant for a finance back-office team. It matches
+payments (`payments.csv`) to invoices (`invoices.csv`), using operational notes in
+natural language (`notes.json`) as extra signal. Every record is classified into
+one of five statuses, with a confidence score, a suggested next action, and a
+plain-English explanation.
 
-## Cómo correrlo
+**Financial decisions are rule-based and deterministic.** An LLM is used only to
+rewrite the explanation into friendlier English — it never decides a status or an
+action (and the pipeline runs fully without it).
+
+## How to run
 
 ```bash
-uv sync                       # instala dependencias (pandas, etc.)
+uv sync
 uv run python -m src.reconcile
 ```
 
-Imprime una tabla CLI con `invoice_id, payment_id, flag, suggested_action,
-ai_explanation`. La exploración paso a paso está en `notebooks/eda.ipynb` y las
-aserciones en `tests/` (`uv run pytest`).
+This prints a CLI table and writes `reconciliation.json`. Step-by-step exploration
+is in `notebooks/eda.ipynb`; tests are in `tests/` (`uv run pytest`).
 
-## Estados
+## Output
 
-| Estado | Significado |
+One record per invoice (duplicate payments are grouped into `matched_payment_ids`),
+plus one record per orphan payment. Fields:
+
+| field | meaning |
 |---|---|
-| **Matched** | El pago concilia con la factura (monto coincide, o la diferencia está explicada por un descuento/ajuste en una nota). |
-| **Partial Match** | El pago cubre solo parte de la factura. Se reporta `remaining_balance`. |
-| **Needs Review** | Match incierto: moneda distinta, pagador desconocido, sobrepago o nota que pide revisión. |
-| **Suspicious** | Posible duplicado o anomalía (p. ej. dos pagos a la misma factura). No cerrar. |
-| **Unmatched** | Registro sin contraparte: un pago que ninguna factura reclama. |
+| `invoice_id` | invoice id (`null` for an orphan payment) |
+| `matched_payment_ids` | list of payment ids matched to it |
+| `status` | one of the five statuses below |
+| `confidence` | 0..1, how strongly the payment matches the invoice |
+| `remaining_balance` | `invoice − paid` (only meaningful for Partial Match; `null` for orphans) |
+| `suggested_action` | next step for the operator (rule-based) |
+| `explanation` | short plain-English reason |
 
-## Estrategia de matching
+## Statuses
 
-El pipeline (`src/reconcile.py`) es **invoice-céntrico** y combina señales:
+| Status | Meaning | Action |
+|---|---|---|
+| **Matched** | Payment reconciles (amount matches, or the gap is a discount/adjustment explained by a note). | Auto-match |
+| **Partial Match** | Payment covers only part of the invoice; `remaining_balance` reported. | Keep invoice open |
+| **Needs Review** | Uncertain: currency mismatch, unknown payer, overpayment, or a note asking for review. | Manual review required |
+| **Suspicious** | Possible duplicate/anomaly (e.g. two payments to one invoice). | Manual review required |
+| **Unmatched** | A payment no invoice claims. | Investigate unmatched payment |
 
-1. **Extracción de IDs** desde el campo libre `reference` (pagos) y `text`
-   (notas) con regex (`_extract_ids`): normaliza `INV-1001`, `INV1002` e
-   `invoice 1001` → `INV-####`, y captura `PO-####`.
-2. **Vínculo factura↔pago**: merge por `invoice_id` extraído, con *fallback* por
-   `po_number` cuando la referencia solo trae el PO.
-3. **Vínculo factura↔nota**: primero por `invoice_id`/`po_number` extraído de la
-   nota; y como **fallback general, por nombre de vendor** cuando la nota no trae
-   ningún ID (es una política a nivel proveedor, p. ej. la de Nova/EUR). La
-   referencia y la nota se concatenan en `ALL_REFERENCES`.
-4. **Clasificación en 2 capas, de general a particular** (gana la primera regla
-   que aplica):
-   - *Capa 1 — texto/política (general)* (`classify_text`): lo que un humano
-     escribió en nota/referencia manda. Regex de prioridad sobre
-     `ALL_REFERENCES` → Suspicious → Needs Review → Partial Match → Matched.
-   - *Capa 2 — señales de datos (particular)* (`_classify_data`): solo para lo
-     que el texto no resolvió — vencimiento, moneda, `Unknown Vendor`, monto
-     parcial/excedente, presencia de pago.
-   - Ejemplo: INV-1008 es `Needs Review` por la **política** de la nota de Nova
-     ("revisar pagos EUR", general); la **moneda EUR≠USD** es el detalle
-     particular que la confirma, por eso la nota se cita primero.
-5. **Pagos huérfanos**: los pagos que ninguna factura reclamó se anexan y caen en
-   `Unmatched` (garantiza que *todo* registro queda clasificado).
-6. **`remaining_balance`**: `amount_factura − amount_pago`, solo en Partial Match.
+## Matching strategy
 
-## Capa de IA (explicaciones) — `src/ai_explain.py`
+The pipeline (`src/reconcile.py`) is **invoice-centric** and combines signals:
 
-Dos niveles, separados a propósito:
+1. **ID extraction** from the free-text `reference` (payments) and `text` (notes)
+   via regex (`_extract_ids`): normalizes `INV-1001`, `INV1002`, `invoice 1001` →
+   `INV-####`, and captures `PO-####`.
+2. **Invoice ↔ payment**: merge on the extracted `invoice_id`, with a `po_number`
+   fallback when the reference only carries the PO.
+3. **Invoice ↔ note**: first by the `invoice_id`/`po_number` extracted from the
+   note; then, as a **general fallback, by vendor name** when the note carries no
+   id (it is a vendor-level policy, e.g. Nova's EUR rule). Reference + note are
+   concatenated into `ALL_REFERENCES`.
+4. **Two-layer classification, general → particular** (first matching rule wins):
+   - *Layer 1 — text/policy (general)* (`classify_text`): what a human wrote in the
+     note/reference wins. Priority regex over `ALL_REFERENCES` → Suspicious →
+     Needs Review → Partial Match → Matched.
+   - *Layer 2 — data signals (particular)* (`_classify_data`): only for what the
+     text did not resolve — due date, currency, `Unknown Vendor`, partial/over
+     amount, presence of a payment.
+   - Example: INV-1008 is `Needs Review` because of Nova's note **policy** ("review
+     EUR payments", general); the **EUR≠USD** currency is the particular detail
+     that confirms it, so the note is cited first.
+5. **Orphan payments**: payments no invoice claimed are appended and become
+   `Unmatched`, so every record is classified.
+6. **`confidence`**: a 0..1 blend of vendor-name similarity, currency match, and
+   amount closeness — independent of the status (a Suspicious case can still be a
+   confident match).
 
-1. **Motivo determinista** (`reconcile.explain`): a partir del flag ya decidido,
-   re-evalúa las mismas señales en el mismo orden que `_classify_data`, de modo que
-   el "por qué" coincide con la causa real y no es texto inventado. Usa
-   `difflib.SequenceMatcher` para la similitud del pagador (typo ~95% vs ajeno ~20%).
-2. **Redacción con LLM** (`ai_explain.enrich`): toma ese motivo determinista + el
-   texto de la nota y, en **una sola llamada batcheada** al SDK de OpenAI con
-   **salida estructurada** (pydantic), devuelve por caso:
-   - `ai_explanation`: el motivo reescrito en inglés simple para el back-office.
-   - `suggested_action`: elegido de un **enum cerrado** (`Auto-match`,
-     `Request remaining balance`, `Manual review required`,
-     `Hold and investigate possible duplicate`, `Route to AP for manual investigation`).
+## Where AI is used — `src/ai_explain.py`
 
-### Setup (no commitear secretos)
+Two levels, separated on purpose:
+
+1. **Deterministic reason** (`reconcile.explain`): from the decided flag, it
+   re-evaluates the same signals in the same order as `_classify_data`, so the
+   "why" matches the real cause. Uses `difflib.SequenceMatcher` for payer
+   similarity (typo ~95% vs stranger ~20%).
+2. **LLM phrasing** (`ai_explain.enrich`): takes that deterministic reason + the
+   note text and, in **one batched OpenAI call with structured output** (pydantic),
+   returns a friendlier English `explanation` per case.
+
+### Setup (do not commit secrets)
 
 ```bash
-export OPENAI_API_KEY=sk-...        # o ponerlo en .env (ya está gitignored)
-export OPENAI_MODEL=gpt-4o-mini     # opcional (default gpt-4o-mini)
+export OPENAI_API_KEY=sk-...        # or put it in .env (already gitignored)
+export OPENAI_MODEL=gpt-4o-mini     # optional (default gpt-4o-mini)
 uv run python -m src.reconcile
 ```
 
 ### Guardrails
 
-- **El LLM no decide el status.** La clasificación es 100% determinista y auditable
-  en `reconcile.py`; el LLM solo *redacta* y *elige* una acción del enum.
-- **Salida estructurada** (pydantic `Batch`/`CaseExplanation`): nada de parseo de
-  texto libre; las acciones quedan acotadas al enum.
-- **Re-alineación por `key`** (`payment_id`), no por orden de la respuesta.
-- **Fallback offline:** sin `OPENAI_API_KEY` o ante cualquier error de la API, cae
-  al motivo determinista + el mapa fijo `status → acción`. El pipeline siempre
-  produce ambas columnas y **los tests nunca tocan la red** (LLM mockeado).
+- **The LLM makes no financial decision.** Status and `suggested_action` are both
+  rule-based; the LLM only rewrites the explanation.
+- **Structured output** (pydantic `Batch`/`CaseExplanation`): no free-text parsing.
+- **Re-alignment by `key`** (`payment_id`), not by response order.
+- **Offline fallback:** without `OPENAI_API_KEY`, or on any API error, it falls
+  back to the deterministic reason. The pipeline always produces every field and
+  **tests never hit the network** (the LLM is mocked).
 
-## Casos observados en los datos
+## Edge cases handled
 
-- **INV-1001** — payer `ACME Logistcs` (typo, ~96% del vendor) + nota confirma → Matched.
-- **INV-1002** — `Grupo Norte` vs `Grupo Norte SA`; ref `INV1002` sin guion → Matched.
-- **INV-1003** — pagó 3000 de 4300; nota dice pago parcial → Partial (saldo 1300).
-- **INV-1004** — `Unknown Vendor`, solo casa por `PO-8894` → Needs Review.
-- **INV-1005** — 1490 vs 1500; nota explica descuento de 10 USD → Matched.
-- **INV-1006** — `Northwind Food` vs `Northwind Foods`, moneda MXN → Matched.
-- **INV-1007** — dos pagos (PAY-9007/9008); nota marca duplicado → Suspicious (×2).
-- **INV-1008** — pago en EUR vs USD facturado; nota pide revisar EUR → Needs Review.
-- **PAY-9010** — `Random Supplier`, "No invoice reference" → Unmatched.
+- Payer-name typos (fuzzy similarity, not exact equality) — e.g. `ACME Logistcs`.
+- Mixed reference formats (`INV-1001`, `INV1002`, `invoice 1001`, PO-only).
+- Partial payments (remaining balance) and discounts/adjustments (gap justified by a note).
+- Duplicate payments to the same invoice → Suspicious, payments grouped.
+- Currency mismatch between invoice and payment.
+- Orphan payments → not dropped, reported as Unmatched.
 
-## Edge cases manejados
+## What I would improve
 
-- Typos en nombres de pagador (similitud difusa, no igualdad exacta).
-- Referencias en formatos mixtos (`INV-1001`, `INV1002`, `invoice 1001`, solo PO).
-- Pagos parciales (saldo pendiente) y descuentos/ajustes (diferencia justificada por nota).
-- Pagos duplicados a la misma factura.
-- Moneda distinta entre factura y pago.
-- Pagos sin contraparte (huérfanos) → no se descartan, se reportan como Unmatched.
-
-## Qué mejoraría
-
-- **Pagos huérfanos → mejor candidato**: hoy solo se marcan Unmatched; podría
-  sugerir la factura más probable por similitud de vendor + monto.
-- **Matching de notas por vendor más robusto**: hoy usa el primer token del
-  nombre; usar similitud difusa para vendors ambiguos o con varias facturas.
-- **LLM real** para `explain` (ver guardrails arriba) y para extraer intención de
-  notas más libres.
-- **Tests** en `test_reconcile.py` en vez del self-check embebido en `__main__`.
-- **Tolerancias configurables** (umbral de similitud, ventana de fechas, moneda).
+- **Orphan payments → best candidate**: today only marked Unmatched; could suggest
+  the most likely invoice by vendor similarity + amount.
+- **More robust note↔vendor matching**: today uses the vendor's first token; use
+  fuzzy similarity for ambiguous vendors or vendors with several invoices.
+- **Confidence calibration**: weights are a simple average; could be tuned against
+  labelled outcomes.
+- **Persistence + review state** (approve/reject/resolved) and an audit trail.
