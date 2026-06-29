@@ -1,0 +1,27 @@
+[project]
+name = "base-labs-aifde-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jupyter>=1.1.1",
+    "mypy>=2.1.0",
+    "pandas>=3.0.4",
+    "pydantic>=2.13.4",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "--cov=. --cov-report=term-missing"
