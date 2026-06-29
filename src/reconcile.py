@@ -243,7 +243,9 @@ def run(data_dir: Path = Path("data")) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    result = run()
-    cols = ["invoice_id", "payment_id", "flag", "remaining_balance", "explanation"]
+    from src.ai_explain import enrich
+
+    result = enrich(run())  # capa de IA; sin OPENAI_API_KEY cae a fallback determinista
+    cols = ["invoice_id", "payment_id", "flag", "suggested_action", "ai_explanation"]
     print(result[cols].to_string(index=False))
-    # Las aserciones viven en test_reconcile.py (uv run pytest).
+    # Las aserciones viven en tests/ (uv run pytest).
