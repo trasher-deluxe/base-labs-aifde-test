@@ -75,6 +75,14 @@ The pipeline (`src/reconcile.py`) is **invoice-centric** and combines signals:
    - Example: INV-1008 is `Needs Review` because of Nova's note **policy** ("review
      EUR payments", general); the **EUR≠USD** currency is the particular detail
      that confirms it, so the note is cited first.
+   - *Note on scope:* the two layers generalize differently, on purpose. Layer 2
+     (data) is **vocabulary-free** — it compares amounts, currencies and dates, so
+     it works on any new row. Layer 1 (text) is a **keyword matcher tuned to the
+     observed note vocabulary**; a new phrasing it does not recognize simply falls
+     through to the data layer. That is acceptable here: the text rules only carry
+     signals with no number behind them (a duplicate warning, an explicit "please
+     review", a discount that authorizes an amount gap). The deterministic
+     generalization lives in the data layer; the LLM is never used to classify.
 5. **Orphan payments**: payments no invoice claimed are appended and become
    `Unmatched`, so every record is classified.
 6. **`confidence`**: a 0..1 blend of vendor-name similarity, currency match, and

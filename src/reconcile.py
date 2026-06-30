@@ -13,6 +13,11 @@ import pandas as pd
 
 # Layer 1: text signals from the payment reference + operational note.
 # Order matters: the first matching rule wins (general policy before data).
+# ponytail: keyword matcher tuned to the observed note vocabulary, not a general
+# NLP model. A phrasing not listed here falls through to the data layer
+# (_classify_data), which is vocabulary-free. Keep only signals with no number
+# behind them (duplicate intent, explicit review request, discount); anything
+# computable from amounts/currency/dates belongs in the data layer.
 RULES = [
     ("Suspicious", r"twice|duplicate|same payment|accidentally"),
     ("Needs Review", r"verify|manually review|\bEUR\b|mismatch"),
