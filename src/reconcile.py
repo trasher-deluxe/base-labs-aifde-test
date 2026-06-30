@@ -296,8 +296,11 @@ def to_records(df: pd.DataFrame) -> list[dict]:
     return records
 
 
-def export_json(df: pd.DataFrame, path: str | Path = "reconciliation.json") -> str:
+def export_json(
+    df: pd.DataFrame, path: str | Path = "data/outputs/reconciliation.json"
+) -> str:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(to_records(df), indent=2, ensure_ascii=False))
     return str(path)
 

@@ -241,6 +241,3 @@ data/
 # Claude Code auto-skills (downloaded skills + their lockfile)
 .agents/
 skills-lock.json
-
-# Generated output
-reconciliation.json
