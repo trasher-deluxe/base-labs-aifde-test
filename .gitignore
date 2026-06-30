@@ -219,8 +219,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# --- Data (never committed) -------------------------------------------------
-data/
+# --- Data: keep the folder in git, but never commit its contents ------------
+data/*
+!data/.gitkeep
 
 # --- Claude Code: multi-level isolation -------------------------------------
 # Block the entire .claude directory by default...
