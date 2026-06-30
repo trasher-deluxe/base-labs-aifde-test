@@ -14,7 +14,8 @@ action (and the pipeline runs fully without it).
 
 ```bash
 uv sync
-uv run python -m src.reconcile
+make run        # or: uv run python -m src.reconcile
+make test       # or: uv run pytest
 ```
 
 This prints a CLI table and writes `data/outputs/reconciliation.json`. Step-by-step exploration
