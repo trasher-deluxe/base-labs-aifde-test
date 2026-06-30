@@ -98,7 +98,9 @@ def enrich(df: pd.DataFrame, model: str | None = None) -> pd.DataFrame:
                 {"role": "user", "content": json.dumps({"cases": cases})},
             ],
         )
-        by_key = {it.key: it for it in resp.choices[0].message.parsed.items}
+        parsed = resp.choices[0].message.parsed
+        assert parsed is not None  # structured output; None only on a refusal
+        by_key = {it.key: it for it in parsed.items}
     except Exception as e:  # network down, API error, rate limit, etc.
         print(f"[ai_explain] LLM unavailable ({e}); using deterministic fallback.")
         return _fallback(df)

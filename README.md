@@ -20,6 +20,12 @@ uv run python -m src.reconcile
 This prints a CLI table and writes `data/outputs/reconciliation.json`. Step-by-step exploration
 is in `notebooks/eda.ipynb`; tests are in `tests/` (`uv run pytest`).
 
+To enable the pre-commit gate (ruff format + lint, mypy, tests):
+
+```bash
+git config core.hooksPath .hooks
+```
+
 ## Output
 
 One record per invoice (duplicate payments are grouped into `matched_payment_ids`),
