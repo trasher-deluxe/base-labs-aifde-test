@@ -14,19 +14,10 @@ import pandas as pd
 # Layer 1: text signals from the payment reference + operational note.
 # Order matters: the first matching rule wins (general policy before data).
 RULES = [
-    ("Suspicious", r"twice|duplicate|same payment|accidentally|double"),
-    (
-        "Needs Review",
-        r"verify|manually review|review before|EUR.*payment|any.*EUR|mismatch",
-    ),
-    (
-        "Partial Match",
-        r"partial payment|partial|remaining balance|balance will be paid|installment",
-    ),
-    (
-        "Matched",
-        r"confirmed payment|confirmed|applied.*discount|payment applied|invoice.*paid",
-    ),
+    ("Suspicious", r"twice|duplicate|same payment|accidentally"),
+    ("Needs Review", r"verify|manually review|\bEUR\b|mismatch"),
+    ("Partial Match", r"partial|remaining balance|installment"),
+    ("Matched", r"confirmed|discount|payment applied|invoice.*paid"),
 ]
 
 STATUSES = {"Matched", "Partial Match", "Needs Review", "Unmatched", "Suspicious"}
@@ -253,6 +244,9 @@ def run(data_dir: Path = Path("data")) -> pd.DataFrame:
     df["remaining_balance"] = (df["amount_invoice_tbl"] - df["amount_payments"]).round(
         2
     )
+    # A Matched case owes nothing: any gap is an authorized discount/adjustment,
+    # not an outstanding balance. Only Partial Match carries a real balance.
+    df.loc[df["flag"] == "Matched", "remaining_balance"] = 0.0
     df["confidence"] = df.apply(confidence, axis=1)
     df["explanation"] = df.apply(explain, axis=1)
     return df

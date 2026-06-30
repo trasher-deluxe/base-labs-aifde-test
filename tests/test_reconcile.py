@@ -58,6 +58,9 @@ def test_remaining_balance(result):
     assert (
         _row(result, invoice_id="INV-1001")["remaining_balance"] == 0.0
     )  # exact match
+    assert (
+        _row(result, invoice_id="INV-1005")["remaining_balance"] == 0.0
+    )  # discount: gap is authorized, nothing outstanding
     assert pd.isna(_row(result, payment_id="PAY-9010")["remaining_balance"])  # orphan
 
 

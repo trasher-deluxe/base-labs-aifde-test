@@ -38,7 +38,7 @@ plus one record per orphan payment. Fields:
 | `matched_payment_ids` | list of payment ids matched to it |
 | `status` | one of the five statuses below |
 | `confidence` | 0..1, how strongly the payment matches the invoice |
-| `remaining_balance` | `invoice − paid` (only meaningful for Partial Match; `null` for orphans) |
+| `remaining_balance` | outstanding amount: the unpaid part for Partial Match, `0` for Matched (any gap is an authorized discount/adjustment), `null` for orphans |
 | `suggested_action` | next step for the operator (rule-based) |
 | `explanation` | short plain-English reason |
 
@@ -57,7 +57,7 @@ plus one record per orphan payment. Fields:
 The pipeline (`src/reconcile.py`) is **invoice-centric** and combines signals:
 
 1. **ID extraction** from the free-text `reference` (payments) and `text` (notes)
-   via regex (`_extract_ids`): normalizes `INV-1001`, `INV1002`, `invoice 1001` →
+   via regex (`_extract`): normalizes `INV-1001`, `INV1002`, `invoice 1001` →
    `INV-####`, and captures `PO-####`.
 2. **Invoice ↔ payment**: merge on the extracted `invoice_id`, with a `po_number`
    fallback when the reference only carries the PO.
